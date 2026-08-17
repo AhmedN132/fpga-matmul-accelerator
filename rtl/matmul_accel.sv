@@ -19,109 +19,80 @@ module matmul_accel #(
 
     logic [RC_W-1:0] row;
     logic [RC_W-1:0] col;
+    logic [RC_W-1:0] k_idx;
 
-    logic signed [ACC_W-1:0] dot_product;
+    logic signed [ACC_W-1:0] accum;
 
-    integer k;
     integer i;
 
-    /*
-     * Combinational dot-product datapath.
-     *
-     * One output matrix element is calculated per clock cycle:
-     *
-     * C[row][col] =
-     *     sum(A[row][k] * B[k][col])
-     */
-    always_comb begin
-        dot_product = '0;
+    logic signed [2*W-1:0] product;
 
-        for (k = 0; k < N; k = k + 1) begin
-            dot_product =
-                dot_product
-                + $signed(a[(row * N) + k])
-                * $signed(b[(k * N) + col]);
-        end
+    always_comb begin
+        product =
+            $signed(a[(row * N) + k_idx]) *
+            $signed(b[(k_idx * N) + col]);
     end
 
-
-    /*
-     * Control logic.
-     *
-     * start:
-     *   Begins a new matrix multiplication when idle.
-     *
-     * busy:
-     *   Remains asserted while output elements are generated.
-     *
-     * done:
-     *   Pulses for one clock cycle after the final element is written.
-     */
     always_ff @(posedge clk or negedge rst_n) begin
-
         if (!rst_n) begin
+            busy  <= 1'b0;
+            done  <= 1'b0;
 
-            busy <= 1'b0;
-            done <= 1'b0;
+            row   <= '0;
+            col   <= '0;
+            k_idx <= '0;
+            accum <= '0;
 
-            row <= '0;
-            col <= '0;
-
-            for (i = 0; i < N*N; i = i + 1) begin
+            for (i = 0; i < N*N; i = i + 1)
                 c[i] <= '0;
-            end
 
         end else begin
-
-            /* done is a one-cycle pulse */
             done <= 1'b0;
 
-            /*
-             * Accept start only while idle.
-             * A start request while busy is ignored.
-             */
             if (start && !busy) begin
+                busy  <= 1'b1;
 
-                busy <= 1'b1;
+                row   <= '0;
+                col   <= '0;
+                k_idx <= '0;
+                accum <= '0;
 
-                row <= '0;
-                col <= '0;
+            end else if (busy) begin
 
-            end
+                if (k_idx == N-1) begin
+                    /*
+                     * Final MAC for this output element.
+                     */
+                    c[(row * N) + col] <=
+                        accum + product;
 
-            else if (busy) begin
+                    accum <= '0;
+                    k_idx <= '0;
 
-                /*
-                 * Store the current output matrix element.
-                 */
-                c[(row * N) + col] <= dot_product;
+                    /*
+                     * Advance to next output element.
+                     */
+                    if (col == N-1) begin
+                        col <= '0;
 
-                /*
-                 * Advance through the output matrix.
-                 */
-                if (col == N-1) begin
-
-                    col <= '0;
-
-                    if (row == N-1) begin
-
-                        /*
-                         * Final output element completed.
-                         */
-                        row <= '0;
-                        busy <= 1'b0;
-                        done <= 1'b1;
+                        if (row == N-1) begin
+                            row  <= '0;
+                            busy <= 1'b0;
+                            done <= 1'b1;
+                        end else begin
+                            row <= row + 1'b1;
+                        end
 
                     end else begin
-
-                        row <= row + 1'b1;
-
+                        col <= col + 1'b1;
                     end
 
                 end else begin
-
-                    col <= col + 1'b1;
-
+                    /*
+                     * Continue accumulating the current dot product.
+                     */
+                    accum <= accum + product;
+                    k_idx <= k_idx + 1'b1;
                 end
             end
         end
