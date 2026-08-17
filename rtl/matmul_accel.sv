@@ -1,96 +1,117 @@
 module matmul_accel #(
-    parameter int N = 4,
-    parameter int W = 8,
-    parameter int ACC_W = 2*W + $clog2(N) + 1
+    parameter integer N = 4,
+    parameter integer W = 8,
+    parameter integer ACC_W = 2*W + $clog2(N) + 1
 )(
-    input  logic clk,
-    input  logic rst_n,
-    input  logic start,
+    input  wire clk,
+    input  wire rst_n,
+    input  wire start,
 
-    input  logic signed [W-1:0] a [0:N*N-1],
-    input  logic signed [W-1:0] b [0:N*N-1],
+    input  wire signed [N*N*W-1:0] a_flat,
+    input  wire signed [N*N*W-1:0] b_flat,
 
-    output logic signed [ACC_W-1:0] c [0:N*N-1],
-    output logic busy,
-    output logic done
+    output reg signed [N*N*ACC_W-1:0] c_flat,
+    output reg busy,
+    output reg done
 );
 
-    localparam int RC_W = (N <= 2) ? 1 : $clog2(N);
+    localparam integer RC_W = (N <= 2) ? 1 : $clog2(N);
 
-    logic [RC_W-1:0] row;
-    logic [RC_W-1:0] col;
-    logic [RC_W-1:0] k_idx;
+    reg [RC_W-1:0] row;
+    reg [RC_W-1:0] col;
+    reg [RC_W-1:0] k_idx;
 
-    logic signed [ACC_W-1:0] accum;
+    reg signed [ACC_W-1:0] accum;
 
-    integer i;
+    wire signed [W-1:0] a_value;
+    wire signed [W-1:0] b_value;
+    wire signed [2*W-1:0] product;
 
-    logic signed [2*W-1:0] product;
+    /*
+     * Extract the current operands from the flattened
+     * row-major matrix buses.
+     *
+     * A[row][k]
+     * B[k][col]
+     */
+    assign a_value =
+        a_flat[((row*N + k_idx)*W) +: W];
 
-    always_comb begin
-        product =
-            $signed(a[(row * N) + k_idx]) *
-            $signed(b[(k_idx * N) + col]);
-    end
+    assign b_value =
+        b_flat[((k_idx*N + col)*W) +: W];
 
-    always_ff @(posedge clk or negedge rst_n) begin
+    assign product = a_value * b_value;
+
+    always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            busy  <= 1'b0;
-            done  <= 1'b0;
+            row    <= 0;
+            col    <= 0;
+            k_idx  <= 0;
+            accum  <= 0;
 
-            row   <= '0;
-            col   <= '0;
-            k_idx <= '0;
-            accum <= '0;
+            c_flat <= 0;
 
-            for (i = 0; i < N*N; i = i + 1)
-                c[i] <= '0;
+            busy   <= 0;
+            done   <= 0;
+        end
+        else begin
+            /*
+             * done is asserted for exactly one cycle.
+             */
+            done <= 0;
 
-        end else begin
-            done <= 1'b0;
-
+            /*
+             * Start a transaction only while idle.
+             */
             if (start && !busy) begin
-                busy  <= 1'b1;
+                row    <= 0;
+                col    <= 0;
+                k_idx  <= 0;
+                accum  <= 0;
 
-                row   <= '0;
-                col   <= '0;
-                k_idx <= '0;
-                accum <= '0;
+                busy   <= 1;
+            end
 
-            end else if (busy) begin
+            else if (busy) begin
 
+                /*
+                 * If this is the final multiplication
+                 * for the current C[row][col], include
+                 * the product and write the result.
+                 */
                 if (k_idx == N-1) begin
-                    /*
-                     * Final MAC for this output element.
-                     */
-                    c[(row * N) + col] <=
-                        accum + product;
 
-                    accum <= '0;
-                    k_idx <= '0;
+                    c_flat[((row*N + col)*ACC_W) +: ACC_W]
+                        <= accum + product;
+
+                    accum <= 0;
+                    k_idx <= 0;
 
                     /*
-                     * Advance to next output element.
+                     * Move to the next matrix element.
                      */
                     if (col == N-1) begin
-                        col <= '0;
+                        col <= 0;
 
                         if (row == N-1) begin
-                            row  <= '0;
-                            busy <= 1'b0;
-                            done <= 1'b1;
-                        end else begin
+                            row  <= 0;
+                            busy <= 0;
+                            done <= 1;
+                        end
+                        else begin
                             row <= row + 1'b1;
                         end
-
-                    end else begin
+                    end
+                    else begin
                         col <= col + 1'b1;
                     end
+                end
 
-                end else begin
-                    /*
-                     * Continue accumulating the current dot product.
-                     */
+                /*
+                 * Continue accumulating the current
+                 * dot product.
+                 */
+                else begin
                     accum <= accum + product;
                     k_idx <= k_idx + 1'b1;
                 end
