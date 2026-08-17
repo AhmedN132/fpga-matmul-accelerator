@@ -1,0 +1,4 @@
+read_verilog -sv rtl/matmul_accel.sv
+hierarchy -top matmul_accel
+proc; opt; memory; opt; techmap; opt
+stat
